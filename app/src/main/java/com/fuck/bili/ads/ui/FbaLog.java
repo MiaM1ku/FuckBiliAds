@@ -9,13 +9,11 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.nio.charset.Charset;
 import java.text.SimpleDateFormat;
-import java.util.ArrayDeque;
 import java.util.Date;
-import java.util.Deque;
 import java.util.Locale;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Event log for the whole module.
@@ -47,26 +45,26 @@ public final class FbaLog {
 
     private static final Charset UTF8 = Charset.forName("UTF-8");
 
-    private static final Object LOCK = new Object();
-    private static final Deque<String> MEMORY = new ArrayDeque<>();
-    /** Lines accepted by {@link #write} but not yet persisted by the worker. */
-    private static final Deque<String> PENDING = new ArrayDeque<>();
-    private static final ExecutorService IO =
-            Executors.newSingleThreadExecutor(runnable -> {
+    /** One retry covers the entire bounded queue while Application is starting. */
+    private static final long RETRY_MILLIS = 500L;
+    private static final ScheduledExecutorService IO =
+            Executors.newSingleThreadScheduledExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "FbaLogIO");
                 thread.setDaemon(true);
                 return thread;
             });
-    private static final AtomicBoolean DRAINING = new AtomicBoolean(false);
-
-    private static volatile String lastError = "";
-    private static volatile boolean fileOk;
+    private static final AsyncEventLog EVENTS = new AsyncEventLog(() -> {
+        Context ctx = FbaRuntime.context();
+        return ctx == null ? null : new FileSink(ctx);
+    }, (task, delay) -> IO.schedule(task, delay, TimeUnit.MILLISECONDS),
+            MEMORY_LINES, PENDING_LIMIT, RETRY_MILLIS);
 
     private FbaLog() {
     }
 
     public static void init(Context ctx) {
         FbaRuntime.init(ctx);
+        EVENTS.kick();
     }
 
     public static void d(String message) {
@@ -93,87 +91,48 @@ public final class FbaLog {
     public static void write(String level, String message) {
         String line = stamp() + " [" + level + "] " + message;
         Log.d(TAG, message);
-        synchronized (LOCK) {
-            MEMORY.addLast(line);
-            while (MEMORY.size() > MEMORY_LINES) {
-                MEMORY.removeFirst();
-            }
-            PENDING.addLast(line);
-            while (PENDING.size() > PENDING_LIMIT) {
-                PENDING.removeFirst();
-            }
-        }
-        scheduleDrain();
+        EVENTS.write(line);
     }
 
-    /** Starts the single background drain if it is not already running. */
-    private static void scheduleDrain() {
-        if (DRAINING.compareAndSet(false, true)) {
-            IO.execute(FbaLog::drain);
-        }
-    }
+    /** File operations are coordinated by AsyncEventLog, separately from producers. */
+    static final class FileSink implements AsyncEventLog.Sink {
+        private final File dir;
+        private final File file;
 
-    /** Persists queued lines in order until the queue is empty. */
-    private static void drain() {
-        try {
-            while (true) {
-                String line;
-                synchronized (LOCK) {
-                    line = PENDING.pollFirst();
-                }
-                if (line == null) {
-                    DRAINING.set(false);
-                    // Recheck to avoid losing a line appended between poll and flag clear.
-                    synchronized (LOCK) {
-                        if (PENDING.isEmpty()) {
-                            return;
-                        }
-                    }
-                    if (!DRAINING.compareAndSet(false, true)) {
-                        return;
-                    }
-                    continue;
-                }
-                Context ctx = FbaRuntime.context();
-                if (ctx == null) {
-                    synchronized (LOCK) {
-                        lastError = "no application context";
-                    }
-                    continue;
-                }
-                appendLine(ctx, line);
-            }
-        } catch (Throwable t) {
-            DRAINING.set(false);
-            synchronized (LOCK) {
-                fileOk = false;
-                lastError = String.valueOf(t);
-            }
-            // A later write will schedule a new drain; lines stay queued.
+        FileSink(Context ctx) {
+            this(new File(ctx.getFilesDir(), DIR));
         }
-    }
 
-    /** Writes one queued line to disk. Only called by the background worker. */
-    private static void appendLine(Context ctx, String line) {
-        synchronized (LOCK) {
-            FileOutputStream out = null;
-            try {
-                File dir = new File(ctx.getFilesDir(), DIR);
-                if (!dir.exists() && !dir.mkdirs()) {
-                    lastError = "mkdir failed: " + dir;
-                    return;
-                }
-                File file = new File(dir, FILE);
-                trimToBudget(file, MAX_BYTES, TRIM_TARGET_BYTES);
-                out = new FileOutputStream(file, true);
+        FileSink(File dir) {
+            this.dir = dir;
+            file = new File(dir, FILE);
+        }
+
+        @Override
+        public void append(String line) throws Exception {
+            if (!dir.exists() && !dir.mkdirs()) {
+                throw new java.io.IOException("mkdir failed: " + dir);
+            }
+            try (FileOutputStream out = new FileOutputStream(file, true)) {
                 out.write((line + "\n").getBytes(UTF8));
-                fileOk = true;
-                lastError = "";
-            } catch (Throwable t) {
-                fileOk = false;
-                lastError = String.valueOf(t);
-            } finally {
-                close(out);
+            }
+            trimToBudget(file, MAX_BYTES, TRIM_TARGET_BYTES);
+        }
+
+        @Override
+        public String read() {
+            return readFile(file, true);
+        }
+
+        @Override
+        public void clear() throws Exception {
+            delete(file);
+            delete(new File(dir, ROTATED));
+        }
+
+        private static void delete(File target) throws java.io.IOException {
+            if (target.exists() && !target.delete()) {
+                throw new java.io.IOException("log clear failed: " + target);
             }
         }
     }
@@ -234,101 +193,44 @@ public final class FbaLog {
 
     /** Persistent log file (tail-truncated), newest last. */
     public static String read() {
-        Context ctx = FbaRuntime.context();
-        if (ctx == null) {
-            return "";
+        String all = EVENTS.read();
+        if (all.length() > MAX_READ_BYTES) {
+            return all.substring(all.length() - MAX_READ_BYTES);
         }
-        // Snapshot the file plus any lines still queued, so the viewer and the
-        // exporter include the last few seconds even before the drain catches up.
-        String pending = pendingText();
-        synchronized (LOCK) {
-            String all = readFile(new File(new File(ctx.getFilesDir(), DIR), FILE), true);
-            if (!pending.isEmpty()) {
-                all = all + pending;
-            }
-            if (all.length() > MAX_READ_BYTES) {
-                return all.substring(all.length() - MAX_READ_BYTES);
-            }
-            return all;
-        }
+        return all;
     }
 
-    /** Queued lines formatted exactly as they will be written to the file. */
-    private static String pendingText() {
-        synchronized (LOCK) {
-            if (PENDING.isEmpty()) {
-                return "";
-            }
-            StringBuilder sb = new StringBuilder();
-            for (String line : PENDING) {
-                sb.append(line).append('\n');
-            }
-            return sb.toString();
-        }
-    }
-
-    /** Test hook: waits for the background writer to finish queued lines. */
+    /** Test hook: waits for completed writes, including the in-flight entry. */
     static void flushForTest() {
-        synchronized (LOCK) {
-            if (PENDING.isEmpty()) {
-                return;
+        try {
+            if (!EVENTS.awaitIdle(5000L)) {
+                throw new IllegalStateException("log flush timed out");
             }
-        }
-        while (true) {
-            synchronized (LOCK) {
-                if (PENDING.isEmpty()) {
-                    break;
-                }
-            }
-            try {
-                Thread.sleep(5L);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
-    /** Test hook: number of lines not yet written to the file. */
+    /** Test hook: number of lines awaiting successful append. */
     static int pendingCountForTest() {
-        synchronized (LOCK) {
-            return PENDING.size();
-        }
+        return EVENTS.pendingCount();
     }
 
-    /** Everything logged since the process started, file or not. */
+    /** Bounded recent history for the current process. */
     public static String recent() {
-        synchronized (LOCK) {
-            StringBuilder sb = new StringBuilder();
-            for (String line : MEMORY) {
-                sb.append(line).append('\n');
-            }
-            return sb.toString();
-        }
+        return EVENTS.recent();
     }
 
     public static boolean fileOk() {
-        return fileOk;
+        return EVENTS.fileOk();
     }
 
     public static String lastError() {
-        return lastError;
+        return EVENTS.lastError();
     }
 
     public static void clear() {
-        Context ctx = FbaRuntime.context();
-        synchronized (LOCK) {
-            MEMORY.clear();
-            PENDING.clear();
-            if (ctx == null) {
-                return;
-            }
-            File dir = new File(ctx.getFilesDir(), DIR);
-            //noinspection ResultOfMethodCallIgnored
-            new File(dir, FILE).delete();
-            //noinspection ResultOfMethodCallIgnored
-            new File(dir, ROTATED).delete();
-        }
+        EVENTS.clear();
     }
 
     public static File file() {

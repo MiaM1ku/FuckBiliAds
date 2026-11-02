@@ -88,6 +88,31 @@ public class FbaLogTest {
     }
 
     @Test
+    public void fileSinkEnforcesBudgetAfterAppendAndClearsCurrentAndLegacyFiles() throws Exception {
+        File dir = Files.createTempDirectory("fba-log-sink").toFile();
+        File file = new File(dir, "events.log");
+        File rotated = new File(dir, "events.log.1");
+        try {
+            FbaLog.FileSink sink = new FbaLog.FileSink(dir);
+            sink.append("x".repeat((int) FbaLog.MAX_BYTES + 100));
+            assertEquals(FbaLog.TRIM_TARGET_BYTES, file.length());
+            sink.append("newest");
+            assertTrue(file.length() <= FbaLog.MAX_BYTES);
+            assertTrue(sink.read().endsWith("newest\n"));
+            Files.write(rotated.toPath(), "legacy".getBytes(StandardCharsets.UTF_8));
+            sink.clear();
+            assertFalse(file.exists());
+            assertFalse(rotated.exists());
+            assertEquals("", sink.read());
+        } finally {
+            Files.deleteIfExists(file.toPath());
+            Files.deleteIfExists(rotated.toPath());
+            Files.deleteIfExists(new File(dir, "events.log.tmp").toPath());
+            Files.deleteIfExists(dir.toPath());
+        }
+    }
+
+    @Test
     public void smallFileIsNotRewritten() throws Exception {
         File file = File.createTempFile("fba-log-small", ".txt");
         try {
