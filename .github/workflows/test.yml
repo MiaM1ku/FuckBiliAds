@@ -42,16 +42,16 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew :app:testDebugUnitTest :app:assembleRelease \
-            -PversionName=1.3.4-cold-start-test --console=plain
-          cp app/build/outputs/apk/release/app-release.apk FuckBiliAds-1.3.4-cold-start-test.apk
+            -PversionName=1.3.4-cold-start-test2 --console=plain
+          cp app/build/outputs/apk/release/app-release.apk FuckBiliAds-1.3.4-cold-start-test2.apk
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs \
-            FuckBiliAds-1.3.4-cold-start-test.apk
-          sha256sum FuckBiliAds-1.3.4-cold-start-test.apk >> "$GITHUB_STEP_SUMMARY"
+            FuckBiliAds-1.3.4-cold-start-test2.apk
+          sha256sum FuckBiliAds-1.3.4-cold-start-test2.apk >> "$GITHUB_STEP_SUMMARY"
           printf '\n测试包使用临时 debug 钥匙签名，运行 release 模式。每次运行生成独立签名，适合备份后的测试环境换装。\n' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: FuckBiliAds-cold-start-test
-          path: FuckBiliAds-1.3.4-cold-start-test.apk
+          path: FuckBiliAds-1.3.4-cold-start-test2.apk
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
