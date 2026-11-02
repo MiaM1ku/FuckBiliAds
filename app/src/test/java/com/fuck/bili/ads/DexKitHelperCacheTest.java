@@ -3,6 +3,8 @@ package com.fuck.bili.ads;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.fail;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Rule;
@@ -130,9 +132,146 @@ public class DexKitHelperCacheTest {
         assertNotEquals(resized, DexKitHelper.hdCacheKey(1, sources));
     }
 
+    @Test
+    public void optionalMissBetweenResolvedResultsStillProducesReusableMobileCache() throws Exception {
+        DexKitHelper scanned = new DexKitHelper();
+        Properties props;
+        try (DexKitHelper.MobileScan scan = scanned.beginMobileScan()) {
+            scanned.CHRONOS_RPC_CLASS_NAME = DexKitHelper.firstName(
+                    Collections.singletonList("resolved.Chronos"), value -> value);
+            scanned.SEARCH_RESULT_ADAPTER_CLASS_NAME = DexKitHelper.firstName(
+                    Collections.<String>emptyList(), value -> {
+                        throw new AssertionError("Empty matches must produce the absent marker");
+                    });
+            scanned.VIP_PREDICT_REQUEST_CLASS_NAME = DexKitHelper.firstName(
+                    Collections.singletonList("resolved.VipRequest"), value -> value);
+            scanned.VIDEO_MENTIONED_COMPONENT_CLASS_NAME = "resolved.VideoMentioned";
+            scanned.NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME = DexKitHelper.firstName(
+                    Collections.<String>emptyList(), value -> value);
+            scanned.REQUEST_INTERCEPTOR = "resolved.Interceptor";
+            props = scan.cacheProperties("current");
+        }
+        assertEquals("", props.getProperty("SEARCH_RESULT_ADAPTER_CLASS_NAME"));
+        assertEquals("", props.getProperty("NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME"));
+        DexKitHelper reloaded = new DexKitHelper();
+        File file = store(props);
+        assertTrue(reloaded.loadCache(file, "current", false));
+        assertTrue(reloaded.loadCache(file, "current", false));
+        assertEquals("resolved.Chronos", reloaded.CHRONOS_RPC_CLASS_NAME);
+        assertEquals("", reloaded.SEARCH_RESULT_ADAPTER_CLASS_NAME);
+        assertEquals("", reloaded.NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME);
+        assertEquals("resolved.VipRequest", reloaded.VIP_PREDICT_REQUEST_CLASS_NAME);
+        assertEquals("resolved.VideoMentioned", reloaded.VIDEO_MENTIONED_COMPONENT_CLASS_NAME);
+        assertEquals("resolved.Interceptor", reloaded.REQUEST_INTERCEPTOR);
+    }
+
+    @Test
+    public void allAbsentMobileScanRestoresPreviousNamesAndKeepsCacheMiss() throws Exception {
+        DexKitHelper scanned = new DexKitHelper();
+        Properties previous = scanned.mobileCacheProperties("old-host");
+        File file = store(previous);
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try (DexKitHelper.MobileScan scan = scanned.beginMobileScan()) {
+                Properties candidates = scanned.mobileCacheProperties("current");
+                for (String key : candidates.stringPropertyNames()) {
+                    if (!key.equals("cache_key") && !key.equals("mobile_schema")) {
+                        assertEquals(key, "", candidates.getProperty(key));
+                    }
+                }
+                assertNull(scan.cacheProperties("current"));
+            }
+            assertEquals(previous, scanned.mobileCacheProperties("old-host"));
+            assertFalse(scanned.loadCache(file, "current", false));
+        }
+    }
+
+    @Test
+    public void genericLibraryMatchesKeepPreviousNamesAndRequestRetry() throws Exception {
+        DexKitHelper scanned = new DexKitHelper();
+        scanned.CHRONOS_RPC_CLASS_NAME = "previous.Chronos";
+        Properties previous = scanned.mobileCacheProperties("old-host");
+        File file = store(previous);
+        try (DexKitHelper.MobileScan scan = scanned.beginMobileScan()) {
+            scanned.albumRecycleViewHolderClassName = "library.Adapter";
+            scanned.publishArchiveCollectionFieldName = "items";
+            scanned.albumSelectPageViewClassName = "library.Binding";
+            scanned.RECYCLER_VIEW_FIELD_NAME = "recycler";
+            scanned.VIP_PREDICT_REQUEST_CLASS_NAME = "retrofit2.LibraryCallback";
+            assertNull(scan.cacheProperties("current"));
+        }
+        assertEquals(previous, scanned.mobileCacheProperties("old-host"));
+        assertFalse(scanned.loadCache(file, "current", false));
+    }
+
+    @Test
+    public void queryAndNativeFailuresRestoreNamesEvenAfterHostMatch() {
+        DexKitHelper scanned = new DexKitHelper();
+        Properties previous = scanned.mobileCacheProperties("current");
+        for (boolean nativeFailure : new boolean[]{false, true}) {
+            try (DexKitHelper.MobileScan scan = scanned.beginMobileScan()) {
+                scanned.CHRONOS_RPC_CLASS_NAME = "partial.Chronos";
+                if (nativeFailure) {
+                    throw new UnsatisfiedLinkError("simulated native failure");
+                }
+                throw new IllegalStateException("simulated query failure");
+            } catch (RuntimeException | LinkageError expected) {
+                assertTrue(expected.getMessage().startsWith("simulated"));
+            }
+            assertEquals(previous, scanned.mobileCacheProperties("current"));
+        }
+    }
+
+    @Test
+    public void ioFailureKeepsVerifiedNamesAndLeavesCacheMissForRetry() throws Exception {
+        DexKitHelper scanned = new DexKitHelper();
+        File directory = temporary.newFolder();
+        try (DexKitHelper.MobileScan scan = scanned.beginMobileScan()) {
+            scanned.CHRONOS_RPC_CLASS_NAME = "resolved.Chronos";
+            Properties props = scan.cacheProperties("current");
+            try (FileOutputStream output = new FileOutputStream(directory)) {
+                props.store(output, "simulated failed cache save");
+            }
+            fail("Opening a directory as a cache file must fail");
+        } catch (java.io.IOException expected) {
+            assertTrue(directory.isDirectory());
+        }
+        assertEquals("resolved.Chronos", scanned.CHRONOS_RPC_CLASS_NAME);
+        assertEquals("", scanned.SEARCH_RESULT_ADAPTER_CLASS_NAME);
+        assertFalse(scanned.loadCache(new File(directory, "missing"), "current", false));
+    }
+
+    @Test
+    public void emptyClassScopeSkipsQueryAndPopulatedScopeStaysRestricted() {
+        assertTrue(DexKitHelper.queryInClasses(Collections.emptyList(), scope -> {
+            throw new AssertionError("Empty class scope must remain an absent result");
+        }).isEmpty());
+        java.util.List<String> classes = Collections.singletonList("resolved.Scope");
+        assertEquals(Collections.singletonList("resolved.Method"),
+                DexKitHelper.queryInClasses(classes, scope -> {
+                    assertEquals(classes, scope);
+                    return Collections.singletonList("resolved.Method");
+                }));
+    }
+
+    @Test
+    public void preFixMobileSchemaRequestsRefreshBeforeApplyingCorruptedVideoName() throws Exception {
+        Properties props = cache();
+        props.setProperty("VIDEO_MENTIONED_COMPONENT_CLASS_NAME", "retrofit2.WrongVipRequest");
+        DexKitHelper helper = new DexKitHelper();
+        String original = helper.VIDEO_MENTIONED_COMPONENT_CLASS_NAME;
+
+        props.remove("mobile_schema");
+        assertFalse(helper.loadCache(store(props), "current", false));
+        assertEquals(original, helper.VIDEO_MENTIONED_COMPONENT_CLASS_NAME);
+        props.setProperty("mobile_schema", "1");
+        assertFalse(helper.loadCache(store(props), "current", false));
+        assertEquals(original, helper.VIDEO_MENTIONED_COMPONENT_CLASS_NAME);
+    }
+
     private static Properties cache() {
         Properties props = new Properties();
         props.setProperty("cache_key", "current");
+        props.setProperty("mobile_schema", DexKitHelper.MOBILE_CACHE_SCHEMA);
         return props;
     }
 

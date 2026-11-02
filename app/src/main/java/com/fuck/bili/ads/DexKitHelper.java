@@ -29,6 +29,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.Properties;
+import java.util.function.Function;
 
 import android.content.pm.ApplicationInfo;
 
@@ -87,6 +88,7 @@ public class DexKitHelper {
 
     public String REQUEST_INTERCEPTOR = "com.bilibili.app.comm.list.common.api.d";
     private static final String TAG = "dexkitHelper";
+    static final String MOBILE_CACHE_SCHEMA = "2";
 
     /** Loads names only; a cache miss is resolved by the background worker. */
     public boolean loadCache(ApplicationInfo appInfo) {
@@ -112,36 +114,11 @@ public class DexKitHelper {
                                 "PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME", "l");
                         return true;
                     }
-                    albumRecycleViewHolderClassName = cacheProps.getProperty("albumRecycleViewHolderClassName", albumRecycleViewHolderClassName);
-                    publishArchiveCollectionFieldName = cacheProps.getProperty("publishArchiveCollectionFieldName", publishArchiveCollectionFieldName);
-                    albumSelectPageViewClassName = cacheProps.getProperty("albumSelectPageViewClassName", albumSelectPageViewClassName);
-                    RECYCLER_VIEW_FIELD_NAME = cacheProps.getProperty("RECYCLER_VIEW_FIELD_NAME", RECYCLER_VIEW_FIELD_NAME);
-                    CHRONOS_RPC_CLASS_NAME = cacheProps.getProperty("CHRONOS_RPC_CLASS_NAME",
-                            cacheProps.getProperty("chronosRpcClassName", CHRONOS_RPC_CLASS_NAME));
-                    DESCRIPTION_TEXTVIEW_CLASS_NAME = cacheProps.getProperty("DESCRIPTION_TEXTVIEW_CLASS_NAME", DESCRIPTION_TEXTVIEW_CLASS_NAME);
-                    INTERNATIONAL_CHRONOS_RPC_CLASS_NAME = cacheProps.getProperty("INTERNATIONAL_CHRONOS_RPC_CLASS_NAME", INTERNATIONAL_CHRONOS_RPC_CLASS_NAME);
-                    INTERNATIONAL_INVOKE_METHOD_NAME = cacheProps.getProperty("INTERNATIONAL_INVOKE_METHOD_NAME", INTERNATIONAL_INVOKE_METHOD_NAME);
-                    PEGASUS_MODEL_CLASS_NAME = cacheProps.getProperty("PEGASUS_MODEL_CLASS_NAME", PEGASUS_MODEL_CLASS_NAME);
-
-                    BASE_SPLASH_CLASS_NAME = cacheProps.getProperty("BASE_SPLASH_CLASS_NAME", BASE_SPLASH_CLASS_NAME);
-                    SPLASH_READY_METHOD_NAME = cacheProps.getProperty("SPLASH_READY_METHOD_NAME", SPLASH_READY_METHOD_NAME);
-                    SPLASH_SKIP_METHOD_NAME = cacheProps.getProperty("SPLASH_SKIP_METHOD_NAME", SPLASH_SKIP_METHOD_NAME);
-
-                    // 读取新增的视频提及缓存
-                    VIDEO_MENTIONED_COMPONENT_CLASS_NAME = cacheProps.getProperty("VIDEO_MENTIONED_COMPONENT_CLASS_NAME", VIDEO_MENTIONED_COMPONENT_CLASS_NAME);
-                    UI_COMPONENT_B_CLASS_NAME = cacheProps.getProperty("UI_COMPONENT_B_CLASS_NAME", UI_COMPONENT_B_CLASS_NAME);
-                    VIEW_ENTRY_CLASS_NAME = cacheProps.getProperty("VIEW_ENTRY_CLASS_NAME", VIEW_ENTRY_CLASS_NAME);
-                    SEARCH_RESULT_ADAPTER_CLASS_NAME = cacheProps.getProperty("SEARCH_RESULT_ADAPTER_CLASS_NAME", SEARCH_RESULT_ADAPTER_CLASS_NAME);
-                    HOME_CARD_ADAPTER_CLASS_NAME = cacheProps.getProperty("HOME_CARD_ADAPTER_CLASS_NAME", HOME_CARD_ADAPTER_CLASS_NAME);
-                    CARD_INFO_SETTING_METHOD_NAME = cacheProps.getProperty("CARD_INFO_SETTING_METHOD_NAME", CARD_INFO_SETTING_METHOD_NAME);
-
-                    PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME = cacheProps.getProperty("PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME", PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME);
-                    VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME = cacheProps.getProperty("VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME", VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME);
-                    VIP_PREDICT_REQUEST_CLASS_NAME = cacheProps.getProperty("VIP_PREDICT_REQUEST_CLASS_NAME", VIP_PREDICT_REQUEST_CLASS_NAME);
-                    NATIVE_WEBVIEW_SUB_CLASS_NAME = cacheProps.getProperty("NATIVE_WEBVIEW_SUB_CLASS_NAME", NATIVE_WEBVIEW_SUB_CLASS_NAME);
-                    NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME = cacheProps.getProperty("NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME", NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME);
-                    NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME = cacheProps.getProperty("NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME", NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME);
-                    REQUEST_INTERCEPTOR = cacheProps.getProperty("REQUEST_INTERCEPTOR", REQUEST_INTERCEPTOR);
+                    // Refresh caches that predate explicit optional misses and the VIP field fix.
+                    if (!MOBILE_CACHE_SCHEMA.equals(cacheProps.getProperty("mobile_schema"))) {
+                        return false;
+                    }
+                    applyMobileProperties(cacheProps);
 
                     return true;
                 }
@@ -163,11 +140,11 @@ public class DexKitHelper {
         long start = System.currentTimeMillis();
         String cacheKey = cacheKeyFor(appInfo);
         File cacheFile = cacheFileFor(appInfo);
-        Properties cacheProps = new Properties();
         if (appInfo.sourceDir != null) {
             System.loadLibrary("dexkit");
             Log.d(TAG, "Starting DexKit deep scan...");
-            try (DexKitBridge bridge = DexKitBridge.create(appInfo.sourceDir)) {
+            try (DexKitBridge bridge = DexKitBridge.create(appInfo.sourceDir);
+                 MobileScan scan = beginMobileScan()) {
                 if (bridge == null) {
                     Log.d(TAG, "DexKit initialization failed!");
                     return;
@@ -254,27 +231,18 @@ public class DexKitHelper {
                 } else {
                     ClassData internationalChronosRPCClassData = getOuterClass(bridge, internationalChronosRPCClassDataList.get(0));
 
-                    if (internationalChronosRPCClassData != null) {
-                        INTERNATIONAL_CHRONOS_RPC_CLASS_NAME = internationalChronosRPCClassData.getName();
-
-                        List<MethodData> internationalInvokeMethodDataList = bridge.findMethod(FindMethod.create()
-                                .searchInClass(Collections.singleton(internationalChronosRPCClassData))
-                                .matcher(MethodMatcher.create()
-                                        .paramCount(2)
-                                        .returnType("void")
-                                        .paramTypes("java.lang.Class", "kotlin.jvm.functions.Function6")
-                                )
-                        );
-                        if (internationalInvokeMethodDataList.isEmpty()) {
-                            Log.d(TAG, "DexKit fail to find internationalInvokeMethod");
-                        } else {
-                            INTERNATIONAL_INVOKE_METHOD_NAME = internationalInvokeMethodDataList.get(0).getName();
-                        }
-                    } else {
-                        Log.d(TAG, "Warning: internationalChronosRPCClassData 的外部类未找到 (可能已不再是内部类)");
+                    if (internationalChronosRPCClassData == null) {
+                        internationalChronosRPCClassData = internationalChronosRPCClassDataList.get(0);
                     }
-
-
+                    INTERNATIONAL_CHRONOS_RPC_CLASS_NAME = internationalChronosRPCClassData.getName();
+                    List<MethodData> internationalInvokeMethodDataList = bridge.findMethod(FindMethod.create()
+                            .searchInClass(Collections.singleton(internationalChronosRPCClassData))
+                            .matcher(MethodMatcher.create()
+                                    .paramCount(2)
+                                    .returnType("void")
+                                    .paramTypes("java.lang.Class", "kotlin.jvm.functions.Function6")));
+                    INTERNATIONAL_INVOKE_METHOD_NAME = firstName(
+                            internationalInvokeMethodDataList, MethodData::getName);
                 }
 
                 ClassMatcher pegasusMatcher = ClassMatcher.create()
@@ -288,7 +256,7 @@ public class DexKitHelper {
                 if (!pegasusResult.isEmpty()) {
                     PEGASUS_MODEL_CLASS_NAME = pegasusResult.get(0).getName();
                 } else {
-                    Log.d(TAG, "❌ 未匹配到推荐流模型类，退回使用硬编码默认值: " + PEGASUS_MODEL_CLASS_NAME);
+                    Log.d(TAG, "推荐流模型特征缺失，缓存为空名字");
                 }
 
 
@@ -338,7 +306,7 @@ public class DexKitHelper {
                         }
                     }
                 } else {
-                    Log.d(TAG, "Failed to find Video Mentioned Component, using fallback.");
+                    Log.d(TAG, "视频提及特征缺失，缓存为空名字");
                 }
                 ClassMatcher splashMatcher = ClassMatcher.create()
                         .usingStrings("onSplashReady， realReady = ", "showSkipButton, skip clicked");
@@ -379,7 +347,7 @@ public class DexKitHelper {
                         Log.d(TAG, "找到 SkipButton 方法: " + SPLASH_SKIP_METHOD_NAME);
                     }
                 } else {
-                    Log.d(TAG, "❌ 未匹配到 BaseSplash 类，退回使用硬编码默认值");
+                    Log.d(TAG, "开屏特征缺失，缓存为空名字");
                 }
 
                 List<ClassData> searchResultAdapterClassDataList = bridge.findClass(FindClass.create()
@@ -395,7 +363,7 @@ public class DexKitHelper {
                                         .addMethod(MethodMatcher.create().name("onBindViewHolder"))
                         )
                 );
-                SEARCH_RESULT_ADAPTER_CLASS_NAME = searchResultAdapterClassDataList.get(0).getName();
+                SEARCH_RESULT_ADAPTER_CLASS_NAME = firstName(searchResultAdapterClassDataList, ClassData::getName);
 
                 List<ClassData> homeCardAdapterClassDataList = bridge.findClass(FindClass.create()
                         .matcher(
@@ -407,46 +375,34 @@ public class DexKitHelper {
                                         )
                         )
                 );
-                HOME_CARD_ADAPTER_CLASS_NAME = homeCardAdapterClassDataList.get(0).getName();
-                List<MethodData> cardInfoSettingMethodDataList = bridge.findMethod(FindMethod.create()
-                        .searchInClass(homeCardAdapterClassDataList)
-                        .matcher(
-                                MethodMatcher.create()
-                                        .paramCount(1)
-                                        .paramTypes("java.util.List")
-                        )
-                );
-                CARD_INFO_SETTING_METHOD_NAME = cardInfoSettingMethodDataList.get(0).getMethodName();
+                HOME_CARD_ADAPTER_CLASS_NAME = firstName(homeCardAdapterClassDataList, ClassData::getName);
+                List<MethodData> cardInfoSettingMethodDataList = findMethodsInClasses(bridge,
+                        homeCardAdapterClassDataList, MethodMatcher.create()
+                                .paramCount(1).paramTypes("java.util.List"));
+                CARD_INFO_SETTING_METHOD_NAME = firstName(cardInfoSettingMethodDataList, MethodData::getMethodName);
 
+                List<ClassData> pegasusParsers = bridge.findClass(FindClass.create()
+                        .matcher(ClassMatcher.create().className("com.bilibili.pegasus.request.PegasusGsonParser")));
+                List<MethodData> pegasusGsonParserParserMethodDataList = findMethodsInClasses(bridge,
+                        pegasusParsers, MethodMatcher.create()
+                                .paramCount(1).paramTypes("okhttp3.ResponseBody"));
+                PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME = firstName(
+                        pegasusGsonParserParserMethodDataList, MethodData::getMethodName);
 
-                List<MethodData> pegasusGsonParserParserMethodDataList = bridge.findMethod(FindMethod.create()
-                        .searchInClass(bridge.findClass(FindClass.create()
-                                .matcher(ClassMatcher.create().className("com.bilibili.pegasus.request.PegasusGsonParser"))
-                        ))
-                        .matcher(MethodMatcher.create()
-                                .paramCount(1)
-                                .paramTypes("okhttp3.ResponseBody")
-                        )
-                );
-                PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME = pegasusGsonParserParserMethodDataList.get(0).getMethodName();
-
-                List<MethodData> vipOpenMembershipPredictScoreMethodDataList = bridge.findMethod(FindMethod.create()
-                        .searchInClass(bridge.findClass(FindClass.create()
-                                .matcher(ClassMatcher.create().className("com.bilibili.tensorflow.model.mem.VipOpenMembershipPredictTFClient"))
-                        ))
-                        .matcher(MethodMatcher.create()
-                                .paramCount(2)
-                                .paramTypes("java.util.List", "java.nio.ByteBuffer")
-                        )
-                );
-                VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME = vipOpenMembershipPredictScoreMethodDataList.get(0).getMethodName();
+                List<ClassData> vipPredictClients = bridge.findClass(FindClass.create()
+                        .matcher(ClassMatcher.create().className("com.bilibili.tensorflow.model.mem.VipOpenMembershipPredictTFClient")));
+                List<MethodData> vipOpenMembershipPredictScoreMethodDataList = findMethodsInClasses(bridge,
+                        vipPredictClients, MethodMatcher.create()
+                                .paramCount(2).paramTypes("java.util.List", "java.nio.ByteBuffer"));
+                VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME = firstName(
+                        vipOpenMembershipPredictScoreMethodDataList, MethodData::getMethodName);
                 List<ClassData> vipPredictRequestClassDataList = bridge.findClass(FindClass.create()
                         .searchPackages("retrofit2")
                         .matcher(ClassMatcher.create()
                                 .usingStrings("Response from ", " was null but response body type was declared as non-null")
                         )
                 );
-                VIDEO_MENTIONED_COMPONENT_CLASS_NAME = vipPredictRequestClassDataList.get(0).getName();
+                VIP_PREDICT_REQUEST_CLASS_NAME = firstName(vipPredictRequestClassDataList, ClassData::getName);
 
                 List<ClassData> nativeWebViewSubClassDataList = bridge.findClass(FindClass.create()
                         .searchPackages("com.bilibili.app.comm")
@@ -474,22 +430,20 @@ public class DexKitHelper {
                                 )
                         )
                 );
-                NATIVE_WEBVIEW_SUB_CLASS_NAME = nativeWebViewSubClassDataList.get(0).getName();
+                NATIVE_WEBVIEW_SUB_CLASS_NAME = firstName(nativeWebViewSubClassDataList, ClassData::getName);
                 List<ClassData> networkShowToastServiceClassDataList = bridge.findClass(FindClass.create()
                         .searchPackages("com.bilibili.ship.theseus.united.player.mediaplay.network")
                         .matcher(ClassMatcher.create()
                                 .usingStrings("show cellular toast, app once: ", ", already show: ")
                         )
                 );
-                NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME = networkShowToastServiceClassDataList.get(0).getName();
+                NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME = firstName(networkShowToastServiceClassDataList, ClassData::getName);
 
-                List<MethodData> networkShowToastServiceMethodDataList = bridge.findMethod(FindMethod.create()
-                        .searchInClass(networkShowToastServiceClassDataList)
-                        .matcher(MethodMatcher.create()
-                                .usingStrings("NetworkShowToastService", "not china sim user, skip free data guide toast")
-                        )
-                );
-                NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME = networkShowToastServiceMethodDataList.get(0).getMethodName();
+                List<MethodData> networkShowToastServiceMethodDataList = findMethodsInClasses(bridge,
+                        networkShowToastServiceClassDataList, MethodMatcher.create()
+                                .usingStrings("NetworkShowToastService", "not china sim user, skip free data guide toast"));
+                NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME = firstName(
+                        networkShowToastServiceMethodDataList, MethodData::getMethodName);
 
                 List<ClassData> requestInterceptorClassDataList =
                         bridge.findClass(FindClass.create()
@@ -506,38 +460,14 @@ public class DexKitHelper {
                     Log.e(TAG, "requestInterceptorClassDataList is empty");
                 else REQUEST_INTERCEPTOR = requestInterceptorClassDataList.get(0).getName();
 
-                cacheProps.setProperty("cache_key", cacheKey);
-                cacheProps.setProperty("albumRecycleViewHolderClassName", albumRecycleViewHolderClassName);
-                cacheProps.setProperty("publishArchiveCollectionFieldName", publishArchiveCollectionFieldName);
-                cacheProps.setProperty("albumSelectPageViewClassName", albumSelectPageViewClassName);
-                cacheProps.setProperty("RECYCLER_VIEW_FIELD_NAME", RECYCLER_VIEW_FIELD_NAME);
-                cacheProps.setProperty("CHRONOS_RPC_CLASS_NAME", CHRONOS_RPC_CLASS_NAME);
-                cacheProps.setProperty("DESCRIPTION_TEXTVIEW_CLASS_NAME", DESCRIPTION_TEXTVIEW_CLASS_NAME);
-                cacheProps.setProperty("INTERNATIONAL_CHRONOS_RPC_CLASS_NAME", INTERNATIONAL_CHRONOS_RPC_CLASS_NAME);
-                cacheProps.setProperty("INTERNATIONAL_INVOKE_METHOD_NAME", INTERNATIONAL_INVOKE_METHOD_NAME);
-                cacheProps.setProperty("PEGASUS_MODEL_CLASS_NAME", PEGASUS_MODEL_CLASS_NAME);
-
-                cacheProps.setProperty("BASE_SPLASH_CLASS_NAME", BASE_SPLASH_CLASS_NAME);
-                cacheProps.setProperty("SPLASH_READY_METHOD_NAME", SPLASH_READY_METHOD_NAME);
-                cacheProps.setProperty("SPLASH_SKIP_METHOD_NAME", SPLASH_SKIP_METHOD_NAME);
-
-                // 保存新增的缓存
-                cacheProps.setProperty("VIDEO_MENTIONED_COMPONENT_CLASS_NAME", VIDEO_MENTIONED_COMPONENT_CLASS_NAME);
-                cacheProps.setProperty("UI_COMPONENT_B_CLASS_NAME", UI_COMPONENT_B_CLASS_NAME);
-                cacheProps.setProperty("VIEW_ENTRY_CLASS_NAME", VIEW_ENTRY_CLASS_NAME);
-                cacheProps.setProperty("SEARCH_RESULT_ADAPTER_CLASS_NAME", SEARCH_RESULT_ADAPTER_CLASS_NAME);
-                cacheProps.setProperty("HOME_CARD_ADAPTER_CLASS_NAME", HOME_CARD_ADAPTER_CLASS_NAME);
-                cacheProps.setProperty("CARD_INFO_SETTING_METHOD_NAME", CARD_INFO_SETTING_METHOD_NAME);
-
-                cacheProps.setProperty("PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME", PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME);
-                cacheProps.setProperty("VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME", VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME);
-                cacheProps.setProperty("VIP_PREDICT_REQUEST_CLASS_NAME", VIP_PREDICT_REQUEST_CLASS_NAME);
-                cacheProps.setProperty("NATIVE_WEBVIEW_SUB_CLASS_NAME", NATIVE_WEBVIEW_SUB_CLASS_NAME);
-                cacheProps.setProperty("NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME", NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME);
-                cacheProps.setProperty("NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME", NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME);
-                cacheProps.setProperty("REQUEST_INTERCEPTOR", REQUEST_INTERCEPTOR);
-
-
+                Properties cacheProps = scan.cacheProperties(cacheKey);
+                if (cacheProps == null) {
+                    Log.d(TAG, "宿主特征缺失，保留原名字并在下次启动重试扫描");
+                    return;
+                }
+                if (cacheFile == null) {
+                    return;
+                }
                 cacheFile.getParentFile().mkdirs();
                 // Atomic: write a sibling file first, then rename, so a second process
                 // scanning in parallel can never read a half-written cache.
@@ -558,6 +488,159 @@ public class DexKitHelper {
                 Log.d(TAG, "Exception during DexKit scan: " + e.getMessage());
             }
         }
+    }
+
+    /** Commits names only after a complete scan observes a host-specific feature. */
+    final class MobileScan implements AutoCloseable {
+        private final Properties previous = mobileCacheProperties("");
+        private boolean accepted;
+
+        private MobileScan() {
+            clearMobileNames();
+        }
+
+        Properties cacheProperties(String cacheKey) {
+            if (!hasMobileHostFeature()) {
+                return null;
+            }
+            Properties props = mobileCacheProperties(cacheKey);
+            accepted = true;
+            return props;
+        }
+
+        @Override
+        public void close() {
+            if (!accepted) {
+                applyMobileProperties(previous);
+            }
+        }
+    }
+
+    MobileScan beginMobileScan() {
+        return new MobileScan();
+    }
+
+    private boolean hasMobileHostFeature() {
+        // Reuse host-specific matches; generic adapters, ViewBinding and retrofit can occur in stubs.
+        return !CHRONOS_RPC_CLASS_NAME.isEmpty()
+                || !DESCRIPTION_TEXTVIEW_CLASS_NAME.isEmpty()
+                || !INTERNATIONAL_CHRONOS_RPC_CLASS_NAME.isEmpty()
+                || !PEGASUS_MODEL_CLASS_NAME.isEmpty()
+                || !BASE_SPLASH_CLASS_NAME.isEmpty()
+                || !VIDEO_MENTIONED_COMPONENT_CLASS_NAME.isEmpty()
+                || !SEARCH_RESULT_ADAPTER_CLASS_NAME.isEmpty()
+                || !HOME_CARD_ADAPTER_CLASS_NAME.isEmpty()
+                || !PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME.isEmpty()
+                || !VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME.isEmpty()
+                || !NATIVE_WEBVIEW_SUB_CLASS_NAME.isEmpty()
+                || !NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME.isEmpty()
+                || !REQUEST_INTERCEPTOR.isEmpty();
+    }
+
+    private void applyMobileProperties(Properties props) {
+        albumRecycleViewHolderClassName = props.getProperty("albumRecycleViewHolderClassName", albumRecycleViewHolderClassName);
+        publishArchiveCollectionFieldName = props.getProperty("publishArchiveCollectionFieldName", publishArchiveCollectionFieldName);
+        albumSelectPageViewClassName = props.getProperty("albumSelectPageViewClassName", albumSelectPageViewClassName);
+        RECYCLER_VIEW_FIELD_NAME = props.getProperty("RECYCLER_VIEW_FIELD_NAME", RECYCLER_VIEW_FIELD_NAME);
+        CHRONOS_RPC_CLASS_NAME = props.getProperty("CHRONOS_RPC_CLASS_NAME",
+                props.getProperty("chronosRpcClassName", CHRONOS_RPC_CLASS_NAME));
+        DESCRIPTION_TEXTVIEW_CLASS_NAME = props.getProperty("DESCRIPTION_TEXTVIEW_CLASS_NAME", DESCRIPTION_TEXTVIEW_CLASS_NAME);
+        INTERNATIONAL_CHRONOS_RPC_CLASS_NAME = props.getProperty("INTERNATIONAL_CHRONOS_RPC_CLASS_NAME", INTERNATIONAL_CHRONOS_RPC_CLASS_NAME);
+        INTERNATIONAL_INVOKE_METHOD_NAME = props.getProperty("INTERNATIONAL_INVOKE_METHOD_NAME", INTERNATIONAL_INVOKE_METHOD_NAME);
+        PEGASUS_MODEL_CLASS_NAME = props.getProperty("PEGASUS_MODEL_CLASS_NAME", PEGASUS_MODEL_CLASS_NAME);
+        BASE_SPLASH_CLASS_NAME = props.getProperty("BASE_SPLASH_CLASS_NAME", BASE_SPLASH_CLASS_NAME);
+        SPLASH_READY_METHOD_NAME = props.getProperty("SPLASH_READY_METHOD_NAME", SPLASH_READY_METHOD_NAME);
+        SPLASH_SKIP_METHOD_NAME = props.getProperty("SPLASH_SKIP_METHOD_NAME", SPLASH_SKIP_METHOD_NAME);
+        VIDEO_MENTIONED_COMPONENT_CLASS_NAME = props.getProperty("VIDEO_MENTIONED_COMPONENT_CLASS_NAME", VIDEO_MENTIONED_COMPONENT_CLASS_NAME);
+        UI_COMPONENT_B_CLASS_NAME = props.getProperty("UI_COMPONENT_B_CLASS_NAME", UI_COMPONENT_B_CLASS_NAME);
+        VIEW_ENTRY_CLASS_NAME = props.getProperty("VIEW_ENTRY_CLASS_NAME", VIEW_ENTRY_CLASS_NAME);
+        SEARCH_RESULT_ADAPTER_CLASS_NAME = props.getProperty("SEARCH_RESULT_ADAPTER_CLASS_NAME", SEARCH_RESULT_ADAPTER_CLASS_NAME);
+        HOME_CARD_ADAPTER_CLASS_NAME = props.getProperty("HOME_CARD_ADAPTER_CLASS_NAME", HOME_CARD_ADAPTER_CLASS_NAME);
+        CARD_INFO_SETTING_METHOD_NAME = props.getProperty("CARD_INFO_SETTING_METHOD_NAME", CARD_INFO_SETTING_METHOD_NAME);
+        PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME = props.getProperty("PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME", PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME);
+        VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME = props.getProperty("VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME", VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME);
+        VIP_PREDICT_REQUEST_CLASS_NAME = props.getProperty("VIP_PREDICT_REQUEST_CLASS_NAME", VIP_PREDICT_REQUEST_CLASS_NAME);
+        NATIVE_WEBVIEW_SUB_CLASS_NAME = props.getProperty("NATIVE_WEBVIEW_SUB_CLASS_NAME", NATIVE_WEBVIEW_SUB_CLASS_NAME);
+        NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME = props.getProperty("NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME", NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME);
+        NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME = props.getProperty("NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME", NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME);
+        REQUEST_INTERCEPTOR = props.getProperty("REQUEST_INTERCEPTOR", REQUEST_INTERCEPTOR);
+    }
+
+    /** Starts optional discovery with an explicit absent value for every mobile feature. */
+    void clearMobileNames() {
+        albumRecycleViewHolderClassName = "";
+        publishArchiveCollectionFieldName = "";
+        albumSelectPageViewClassName = "";
+        RECYCLER_VIEW_FIELD_NAME = "";
+        CHRONOS_RPC_CLASS_NAME = "";
+        DESCRIPTION_TEXTVIEW_CLASS_NAME = "";
+        INTERNATIONAL_CHRONOS_RPC_CLASS_NAME = "";
+        INTERNATIONAL_INVOKE_METHOD_NAME = "";
+        PEGASUS_MODEL_CLASS_NAME = "";
+        BASE_SPLASH_CLASS_NAME = "";
+        SPLASH_READY_METHOD_NAME = "";
+        SPLASH_SKIP_METHOD_NAME = "";
+        VIDEO_MENTIONED_COMPONENT_CLASS_NAME = "";
+        UI_COMPONENT_B_CLASS_NAME = "";
+        VIEW_ENTRY_CLASS_NAME = "";
+        SEARCH_RESULT_ADAPTER_CLASS_NAME = "";
+        HOME_CARD_ADAPTER_CLASS_NAME = "";
+        CARD_INFO_SETTING_METHOD_NAME = "";
+        PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME = "";
+        VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME = "";
+        VIP_PREDICT_REQUEST_CLASS_NAME = "";
+        NATIVE_WEBVIEW_SUB_CLASS_NAME = "";
+        NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME = "";
+        NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME = "";
+        REQUEST_INTERCEPTOR = "";
+    }
+
+    Properties mobileCacheProperties(String cacheKey) {
+        Properties props = new Properties();
+        props.setProperty("cache_key", cacheKey);
+        props.setProperty("mobile_schema", MOBILE_CACHE_SCHEMA);
+        props.setProperty("albumRecycleViewHolderClassName", albumRecycleViewHolderClassName);
+        props.setProperty("publishArchiveCollectionFieldName", publishArchiveCollectionFieldName);
+        props.setProperty("albumSelectPageViewClassName", albumSelectPageViewClassName);
+        props.setProperty("RECYCLER_VIEW_FIELD_NAME", RECYCLER_VIEW_FIELD_NAME);
+        props.setProperty("CHRONOS_RPC_CLASS_NAME", CHRONOS_RPC_CLASS_NAME);
+        props.setProperty("DESCRIPTION_TEXTVIEW_CLASS_NAME", DESCRIPTION_TEXTVIEW_CLASS_NAME);
+        props.setProperty("INTERNATIONAL_CHRONOS_RPC_CLASS_NAME", INTERNATIONAL_CHRONOS_RPC_CLASS_NAME);
+        props.setProperty("INTERNATIONAL_INVOKE_METHOD_NAME", INTERNATIONAL_INVOKE_METHOD_NAME);
+        props.setProperty("PEGASUS_MODEL_CLASS_NAME", PEGASUS_MODEL_CLASS_NAME);
+        props.setProperty("BASE_SPLASH_CLASS_NAME", BASE_SPLASH_CLASS_NAME);
+        props.setProperty("SPLASH_READY_METHOD_NAME", SPLASH_READY_METHOD_NAME);
+        props.setProperty("SPLASH_SKIP_METHOD_NAME", SPLASH_SKIP_METHOD_NAME);
+        props.setProperty("VIDEO_MENTIONED_COMPONENT_CLASS_NAME", VIDEO_MENTIONED_COMPONENT_CLASS_NAME);
+        props.setProperty("UI_COMPONENT_B_CLASS_NAME", UI_COMPONENT_B_CLASS_NAME);
+        props.setProperty("VIEW_ENTRY_CLASS_NAME", VIEW_ENTRY_CLASS_NAME);
+        props.setProperty("SEARCH_RESULT_ADAPTER_CLASS_NAME", SEARCH_RESULT_ADAPTER_CLASS_NAME);
+        props.setProperty("HOME_CARD_ADAPTER_CLASS_NAME", HOME_CARD_ADAPTER_CLASS_NAME);
+        props.setProperty("CARD_INFO_SETTING_METHOD_NAME", CARD_INFO_SETTING_METHOD_NAME);
+        props.setProperty("PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME", PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME);
+        props.setProperty("VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME", VIP_OPEN_MEMBERSHIP_PREDICT_SCORE_METHOD_NAME);
+        props.setProperty("VIP_PREDICT_REQUEST_CLASS_NAME", VIP_PREDICT_REQUEST_CLASS_NAME);
+        props.setProperty("NATIVE_WEBVIEW_SUB_CLASS_NAME", NATIVE_WEBVIEW_SUB_CLASS_NAME);
+        props.setProperty("NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME", NETWORK_SHOW_TOAST_SERVICE_CLASS_NAME);
+        props.setProperty("NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME", NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME);
+        props.setProperty("REQUEST_INTERCEPTOR", REQUEST_INTERCEPTOR);
+        return props;
+    }
+
+    static <T> String firstName(List<T> results, Function<T, String> name) {
+        return results.isEmpty() ? "" : name.apply(results.get(0));
+    }
+
+    /** Keeps an absent class scope local, since an empty DexKit scope can widen the query. */
+    static <T, R> List<R> queryInClasses(List<T> classes, Function<List<T>, List<R>> query) {
+        return classes.isEmpty() ? Collections.emptyList() : query.apply(classes);
+    }
+
+    private static List<MethodData> findMethodsInClasses(DexKitBridge bridge,
+                                                         List<ClassData> classes,
+                                                         MethodMatcher matcher) {
+        return queryInClasses(classes, scope -> bridge.findMethod(FindMethod.create()
+                .searchInClass(scope).matcher(matcher)));
     }
 
     /**
