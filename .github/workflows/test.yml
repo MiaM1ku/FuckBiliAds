@@ -24,8 +24,9 @@ jobs:
           java-version: '21'
       - uses: gradle/actions/setup-gradle@v4
       - uses: android-actions/setup-android@v3
-      - name: Prepare Android SDK
-        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: false
       - name: Create temporary debug signing key
         run: |
           keytool -genkeypair -keystore "$RUNNER_TEMP/test.jks" \
