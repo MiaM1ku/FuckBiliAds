@@ -13,6 +13,8 @@ import com.fuck.bili.ads.core.Host;
 import com.fuck.bili.ads.core.HookRegistry;
 import com.fuck.bili.ads.core.NativeHooks;
 import com.fuck.bili.ads.core.Reflect;
+import com.fuck.bili.ads.core.ResourceIdCache;
+import com.fuck.bili.ads.core.StartupTiming;
 import com.fuck.bili.ads.settings.FollowingTopLeftButton;
 import com.fuck.bili.ads.story.StoryAdSniper;
 import com.fuck.bili.ads.ui.FbaLog;
@@ -38,6 +40,9 @@ public class MainHook extends XposedModule {
     private static final String HD_PACKAGE_NAME = "tv.danmaku.bilibilihd";
 
     public static boolean isInternational = false;
+
+    private static final ResourceIdCache UNDER_PLAYER_IDS = new ResourceIdCache();
+    private static volatile StartupTiming startupTiming;
 
     /** One installation per process; repeated callbacks would stack hooks. */
     private static final java.util.concurrent.atomic.AtomicBoolean LOADED =
@@ -66,6 +71,18 @@ public class MainHook extends XposedModule {
             FbaLog.d("[SKIP] duplicate onPackageLoaded: " + packageName);
             return;
         }
+        StartupTiming timing = new StartupTiming(android.os.SystemClock::elapsedRealtime,
+                android.os.SystemClock::currentThreadTimeMillis);
+        startupTiming = timing;
+        StartupTiming.Span callback = timing.begin("package-loaded");
+        try {
+            loadHost(param, packageName);
+        } finally {
+            FbaLog.i(timing.end(callback));
+        }
+    }
+
+    private void loadHost(XposedModuleInterface.PackageLoadedParam param, String packageName) {
         if (INTERNATIONAL_PACKAGE_NAME.equals(packageName)) {
             isInternational = true;
         }
@@ -106,6 +123,7 @@ public class MainHook extends XposedModule {
         // Register splash request interception before host clients are constructed.
         install("开屏拦截", () -> BiliSplashSniper.hookEarly(classLoader));
         FbaRuntime.whenReady(() -> {
+            perfMark("preferences-ready context=" + (FbaRuntime.context() != null));
             try {
                 installReadyHooks(classLoader, hd);
             } finally {
@@ -125,13 +143,17 @@ public class MainHook extends XposedModule {
 
         final boolean shouldRunDescCopyFix = !isOldHost(appInfo, packageName);
         final DexKitHelper helper = new DexKitHelper(classLoader);
-        final Runnable dependent = () -> FbaRuntime.whenReady(() -> {
-            try {
-                installDependent(packageName, classLoader, helper, shouldRunDescCopyFix);
-            } finally {
-                stageDone.run();
-            }
-        });
+        final Runnable dependent = () -> {
+            perfMark("dex-resolved");
+            FbaRuntime.whenReady(() -> {
+                perfMark("dependent-ready context=" + (FbaRuntime.context() != null));
+                try {
+                    installDependent(packageName, classLoader, helper, shouldRunDescCopyFix);
+                } finally {
+                    stageDone.run();
+                }
+            });
+        };
 
         long started = android.os.SystemClock.elapsedRealtime();
         if (helper.loadCache(appInfo)) {
@@ -233,11 +255,18 @@ public class MainHook extends XposedModule {
     }
 
     private static void finishBoot() {
-        HookRegistry.dumpToLog();
-        HookRegistry.dumpToFileWhenReady();
+        perfMark("hooks-ready");
+        HookRegistry.dumpAsyncWhenReady();
         FbaLog.i("[BOOT] hooks done: " + FbaRuntime.summary()
                 + ", registered=" + HookRegistry.size());
         FbaRuntime.announce(2500L);
+    }
+
+    private static void perfMark(String event) {
+        StartupTiming timing = startupTiming;
+        if (timing != null) {
+            FbaLog.i(timing.mark(event));
+        }
     }
 
     /**
@@ -246,18 +275,27 @@ public class MainHook extends XposedModule {
      * report their own fine-grained status via {@link FbaRuntime#mark(String, boolean)}.
      */
     private static void install(String name, Runnable action) {
+        StartupTiming timing = startupTiming;
+        StartupTiming.Span span = timing == null ? null : timing.begin(name);
+        int before = HookRegistry.size();
         try {
             action.run();
         } catch (Throwable t) {
             FbaLog.e("[HOOK FAIL] " + name, t);
             FbaRuntime.mark(name, false);
+        } finally {
+            if (span != null) {
+                FbaLog.i(timing.end(span) + " registryDelta=" + (HookRegistry.size() - before));
+            }
         }
     }
 
     private static void executeOriginalHooks(String packageName, ClassLoader classLoader,
                                              DexKitHelper helper) {
         if (!isInternational && !Host.isHdPackage(packageName)) {
-            removeAdUnderPlayer(classLoader);
+            if (FbaPrefs.blockPlay()) {
+                removeAdUnderPlayer(classLoader);
+            }
             try {
                 BiliGsonLobotomy.hookPegasusAd(classLoader, helper.PEGASUS_MODEL_CLASS_NAME);
             } catch (Throwable t) {
@@ -372,8 +410,11 @@ public class MainHook extends XposedModule {
                     View.class, int.class);
             NativeHooks.hook("MainHook.UnderPlayerContainer", findChild, chain -> {
                 Object result = chain.proceed();
+                if (result == null) {
+                    return null;
+                }
                 int targetId = resolveUnderPlayerId((View) chain.getArg(0));
-                if (targetId > 0 && (Integer) chain.getArg(1) == targetId) {
+                if (targetId > 0 && (Integer) chain.getArg(1) == targetId && FbaPrefs.blockPlay()) {
                     View targetView = (View) result;
                     if (targetView != null) {
                         ViewGroup.LayoutParams params = targetView.getLayoutParams();
@@ -420,8 +461,13 @@ public class MainHook extends XposedModule {
         if (rootView == null || rootView.getContext() == null) {
             return 0;
         }
-        return rootView.getContext().getResources()
-                .getIdentifier("underplayer_container", "id", PACKAGE_NAME);
+        android.content.res.Resources resources = rootView.getContext().getResources();
+        return UNDER_PLAYER_IDS.get(resources, () -> {
+            String packageName = Host.packageName();
+            int id = resources.getIdentifier("underplayer_container", "id", packageName);
+            return id == 0 && !PACKAGE_NAME.equals(packageName)
+                    ? resources.getIdentifier("underplayer_container", "id", PACKAGE_NAME) : id;
+        });
     }
 
     public static void log(String message) {

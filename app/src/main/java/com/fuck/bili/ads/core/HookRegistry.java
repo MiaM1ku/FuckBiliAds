@@ -2,6 +2,13 @@ package com.fuck.bili.ads.core;
 
 import com.fuck.bili.ads.ui.FbaLog;
 
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.lang.reflect.Executable;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -9,7 +16,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.LinkedHashSet;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import io.github.libxposed.api.XposedInterface;
 
@@ -22,6 +33,12 @@ public final class HookRegistry {
     private static final String TAG = "HookRegistry";
 
     private static final List<Record> HOOKS = new CopyOnWriteArrayList<>();
+    private static final ScheduledExecutorService AUDIT =
+            Executors.newSingleThreadScheduledExecutor(action -> {
+                Thread thread = new Thread(action, "FbaHookAudit");
+                thread.setDaemon(true);
+                return thread;
+            });
 
     private HookRegistry() {
     }
@@ -99,53 +116,68 @@ public final class HookRegistry {
         }
     }
 
-    /**
-     * Writes {@code current-hooks.txt} once a host Application is available.
-     * libxposed may call the module before Application#attach, so retry briefly
-     * on the main thread instead of silently losing the G2.2 artifact.
-     */
-    public static void dumpToFileWhenReady() {
-        dumpToFile(0);
+    /** Captures this startup stage, then formats, logs and writes it on the audit worker. */
+    public static void dumpAsyncWhenReady() {
+        List<Record> records = new ArrayList<>(HOOKS);
+        AUDIT.execute(() -> {
+            List<String> lines = new ArrayList<>(records.size());
+            for (Record record : records) {
+                lines.add(record.key);
+            }
+            Collections.sort(lines);
+            FbaLog.i("[HOOK REGISTRY] size=" + records.size());
+            for (String line : lines) {
+                FbaLog.i("[HOOK REGISTRY] " + line);
+            }
+            dumpToFile(lines, 0);
+        });
     }
 
-    private static void dumpToFile(final int attempt) {
+    /** Writes an immutable member snapshot once a host Application is available. */
+    public static void dumpToFileWhenReady() {
+        List<String> lines = dump();
+        AUDIT.execute(() -> dumpToFile(lines, 0));
+    }
+
+    private static void dumpToFile(List<String> lines, int attempt) {
         try {
             android.app.Application application = Host.currentApplication();
             if (application == null) {
                 if (attempt >= 20) {
-                    FbaLog.w("[HOOK REGISTRY] no application context after retries, file dump skipped");
+                    FbaLog.w("[HOOK REGISTRY] application unavailable after retries; snapshot retained in log");
                     return;
                 }
-                android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
-                handler.postDelayed(() -> dumpToFile(attempt + 1), 500L);
+                AUDIT.schedule(() -> dumpToFile(lines, attempt + 1), 500L, TimeUnit.MILLISECONDS);
                 return;
             }
-            java.io.File dir = new java.io.File(application.getCacheDir(), "fuckbiliads");
-            if (!dir.exists() && !dir.mkdirs()) {
-                FbaLog.w("[HOOK REGISTRY] cannot create " + dir);
-                return;
-            }
-            java.io.File file = new java.io.File(dir, "current-hooks.txt");
-            java.io.BufferedWriter writer = new java.io.BufferedWriter(
-                    new java.io.OutputStreamWriter(
-                            new java.io.FileOutputStream(file, false), "UTF-8"));
-            List<String> unique = dumpUnique();
-            try {
-                writer.write("# libxposed API 102 hook registry, handles=" + HOOKS.size()
-                        + ", unique=" + unique.size());
-                writer.newLine();
-                for (String line : unique) {
-                    writer.write(line);
-                    writer.newLine();
-                }
-            } finally {
-                writer.close();
-            }
+            File file = new File(new File(application.getCacheDir(), "fuckbiliads"), "current-hooks.txt");
+            writeSnapshot(file, lines);
             FbaLog.i("[HOOK REGISTRY] written " + file.getAbsolutePath()
-                    + ", handles=" + HOOKS.size() + ", unique=" + unique.size());
+                    + ", handles=" + lines.size() + ", unique=" + new LinkedHashSet<>(lines).size());
         } catch (Throwable t) {
             FbaLog.e("[HOOK REGISTRY] file dump failed", t);
         }
+    }
+
+    static void writeSnapshot(File file, List<String> lines) throws Exception {
+        File parent = file.getParentFile();
+        if (!parent.isDirectory() && !parent.mkdirs()) {
+            throw new java.io.IOException("cannot create registry directory: " + parent);
+        }
+        LinkedHashSet<String> unique = new LinkedHashSet<>(lines);
+        File temporary = new File(parent, file.getName() + ".tmp");
+        try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(
+                new FileOutputStream(temporary, false), StandardCharsets.UTF_8))) {
+            writer.write("# libxposed API 102 hook registry, handles=" + lines.size()
+                    + ", unique=" + unique.size());
+            writer.newLine();
+            for (String line : unique) {
+                writer.write(line);
+                writer.newLine();
+            }
+        }
+        Files.move(temporary.toPath(), file.toPath(),
+                StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
     }
 
     public static final class Record {

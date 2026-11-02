@@ -20,7 +20,9 @@ import java.util.concurrent.ConcurrentHashMap;
 /** 弹幕发送者候选查询：客户端缓存、复制触发、主页检查及候选窗口。 */
 public final class DanmuSenderLookup {
     private static final String TAG = "FuckBiliAds";
-    private static final boolean IS_DEBUG = true;
+    private static final boolean IS_DEBUG = BuildConfig.DEBUG;
+    /** Enable explicitly when investigating an already opted-in debug build. */
+    private static final boolean ENABLE_SPACE_PROBE = false;
 
     private static volatile java.lang.ref.WeakReference<android.app.Activity> senderActivity =
             new java.lang.ref.WeakReference<>(null);
@@ -118,8 +120,14 @@ public final class DanmuSenderLookup {
                             DexKitHelper helper) {
         senderHostClassLoader = classLoader;
         dexHelper = helper;
-        installSpaceProbe(packageName, processName);
+        if (shouldEnableSpaceProbe(BuildConfig.DEBUG, ENABLE_SPACE_PROBE)) {
+            installSpaceProbe(packageName, processName);
+        }
         new DanmuSenderLookup().installLookupHooks(packageName, classLoader, helper);
+    }
+
+    static boolean shouldEnableSpaceProbe(boolean debugBuild, boolean explicitlyRequested) {
+        return debugBuild && explicitlyRequested;
     }
 
     private void installLookupHooks(String packageName, ClassLoader classLoader, DexKitHelper helper) {
