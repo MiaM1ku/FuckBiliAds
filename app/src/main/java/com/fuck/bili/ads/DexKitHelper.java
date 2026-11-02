@@ -22,13 +22,29 @@ import org.luckypray.dexkit.result.MethodData;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.Properties;
 
 import android.content.pm.ApplicationInfo;
 
 public class DexKitHelper {
+
+    private final ClassLoader hostLoader;
+    List<String> hdUnderPlayerClasses = Collections.emptyList();
+    List<String> hdRelateClasses = Collections.emptyList();
+
+    public DexKitHelper() {
+        this(null);
+    }
+
+    public DexKitHelper(ClassLoader hostLoader) {
+        this.hostLoader = hostLoader;
+    }
 
     public String albumRecycleViewHolderClassName = "PJ0.e";
     public String publishArchiveCollectionFieldName = "a";
@@ -72,32 +88,36 @@ public class DexKitHelper {
     public String REQUEST_INTERCEPTOR = "com.bilibili.app.comm.list.common.api.d";
     private static final String TAG = "dexkitHelper";
 
-    // 开启测试模式，强制扫描并打印结果
-    public final boolean IS_TESTING = BuildConfig.DEBUG;
+    /** Loads names only; a cache miss is resolved by the background worker. */
+    public boolean loadCache(ApplicationInfo appInfo) {
+        return loadCache(cacheFileFor(appInfo), cacheKeyFor(appInfo),
+                Host.isHdPackage(appInfo.packageName));
+    }
 
-    public void resolve(ApplicationInfo appInfo) {
-        if (Host.isHdPackage(appInfo.packageName)) {
-            resolveHd(appInfo);
-            return;
-        }
-        long start = System.currentTimeMillis();
-        String cacheKey = cacheKeyFor(appInfo);
-        File cacheFile = cacheFileFor(appInfo);
-        Properties cacheProps = new Properties();
-        boolean needScan = true;
-
-        if (cacheFile != null && cacheFile.exists()) {
+    boolean loadCache(File cacheFile, String cacheKey, boolean hd) {
+        if (cacheFile != null && cacheFile.isFile()) {
             try (FileInputStream fis = new FileInputStream(cacheFile)) {
+                Properties cacheProps = new Properties();
                 cacheProps.load(fis);
-                String cachedKey = cacheProps.getProperty("cache_key");
-
-                if (cacheKey.equals(cachedKey)) {
-                    Log.d(TAG, "Hit DexKit cache. Host/module unchanged, skipping scan.");
+                if (cacheKey.equals(cacheProps.getProperty("cache_key"))) {
+                    if (hd) {
+                        String underPlayer = cacheProps.getProperty("hdUnderPlayerClasses");
+                        String relate = cacheProps.getProperty("hdRelateClasses");
+                        if (underPlayer == null || relate == null) {
+                            return false;
+                        }
+                        hdUnderPlayerClasses = classNames(underPlayer);
+                        hdRelateClasses = classNames(relate);
+                        PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME = cacheProps.getProperty(
+                                "PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME", "l");
+                        return true;
+                    }
                     albumRecycleViewHolderClassName = cacheProps.getProperty("albumRecycleViewHolderClassName", albumRecycleViewHolderClassName);
                     publishArchiveCollectionFieldName = cacheProps.getProperty("publishArchiveCollectionFieldName", publishArchiveCollectionFieldName);
                     albumSelectPageViewClassName = cacheProps.getProperty("albumSelectPageViewClassName", albumSelectPageViewClassName);
                     RECYCLER_VIEW_FIELD_NAME = cacheProps.getProperty("RECYCLER_VIEW_FIELD_NAME", RECYCLER_VIEW_FIELD_NAME);
-                    CHRONOS_RPC_CLASS_NAME = cacheProps.getProperty("chronosRpcClassName", CHRONOS_RPC_CLASS_NAME);
+                    CHRONOS_RPC_CLASS_NAME = cacheProps.getProperty("CHRONOS_RPC_CLASS_NAME",
+                            cacheProps.getProperty("chronosRpcClassName", CHRONOS_RPC_CLASS_NAME));
                     DESCRIPTION_TEXTVIEW_CLASS_NAME = cacheProps.getProperty("DESCRIPTION_TEXTVIEW_CLASS_NAME", DESCRIPTION_TEXTVIEW_CLASS_NAME);
                     INTERNATIONAL_CHRONOS_RPC_CLASS_NAME = cacheProps.getProperty("INTERNATIONAL_CHRONOS_RPC_CLASS_NAME", INTERNATIONAL_CHRONOS_RPC_CLASS_NAME);
                     INTERNATIONAL_INVOKE_METHOD_NAME = cacheProps.getProperty("INTERNATIONAL_INVOKE_METHOD_NAME", INTERNATIONAL_INVOKE_METHOD_NAME);
@@ -123,13 +143,29 @@ public class DexKitHelper {
                     NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME = cacheProps.getProperty("NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME", NETWORK_SHOW_TOAST_SERVICE_METHOD_NAME);
                     REQUEST_INTERCEPTOR = cacheProps.getProperty("REQUEST_INTERCEPTOR", REQUEST_INTERCEPTOR);
 
-                    needScan = false;
+                    return true;
                 }
-            } catch (Exception e) {
-                Log.d(TAG, "Failed to read cache, forcing rescan: " + e.getMessage());
+            } catch (Exception ignored) {
+                // Missing, stale and damaged caches are refreshed by the worker.
             }
         }
-        if (needScan || IS_TESTING) {
+        return false;
+    }
+
+    public void resolve(ApplicationInfo appInfo) {
+        if (loadCache(appInfo)) {
+            return;
+        }
+        if (Host.isHdPackage(appInfo.packageName)) {
+            resolveHd(appInfo);
+            return;
+        }
+        long start = System.currentTimeMillis();
+        String cacheKey = cacheKeyFor(appInfo);
+        File cacheFile = cacheFileFor(appInfo);
+        Properties cacheProps = new Properties();
+        if (appInfo.sourceDir != null) {
+            System.loadLibrary("dexkit");
             Log.d(TAG, "Starting DexKit deep scan...");
             try (DexKitBridge bridge = DexKitBridge.create(appInfo.sourceDir)) {
                 if (bridge == null) {
@@ -528,7 +564,11 @@ public class DexKitHelper {
      * Cache identity: module build + host APK fingerprint. LSPosed 注入的 classloader
      * 拿不到 CodeSource（null），所以不能用模块 APK 的 mtime 做 key。
      */
-    private static String cacheKeyFor(ApplicationInfo appInfo) {
+    private String cacheKeyFor(ApplicationInfo appInfo) {
+        if (Host.isHdPackage(appInfo.packageName)) {
+            return hdCacheKey(BuildConfig.VERSION_CODE,
+                    PlayPageAdSniper.sources(hostLoader, appInfo.sourceDir));
+        }
         long apkTime = 0L;
         long apkSize = 0L;
         try {
@@ -541,6 +581,20 @@ public class DexKitHelper {
         return "m" + BuildConfig.VERSION_CODE + "-h" + apkTime + "-s" + apkSize;
     }
 
+    static String hdCacheKey(int moduleVersion, List<String> sources) {
+        StringBuilder key = new StringBuilder("m").append(moduleVersion).append("-hd2");
+        for (String source : sources) {
+            File apk = new File(source);
+            key.append('|').append(apk.getAbsolutePath())
+                    .append(':').append(apk.lastModified()).append(':').append(apk.length());
+        }
+        return key.toString();
+    }
+
+    private static List<String> classNames(String value) {
+        return value.isEmpty() ? Collections.emptyList() : Arrays.asList(value.split("\n"));
+    }
+
     private static File cacheFileFor(ApplicationInfo appInfo) {
         try {
             return new File(appInfo.dataDir, "cache/dexkit_hook_cache.properties");
@@ -549,72 +603,69 @@ public class DexKitHelper {
         }
     }
 
-    /** 快速判断（几毫秒）：当前宿主 + 模块构建是否已有可用缓存。 */
-    public boolean cacheValid(ApplicationInfo appInfo) {
-        File file = cacheFileFor(appInfo);
-        if (file == null || !file.exists()) {
-            return false;
-        }
-        Properties props = new Properties();
-        try (FileInputStream fis = new FileInputStream(file)) {
-            props.load(fis);
-            return cacheKeyFor(appInfo).equals(props.getProperty("cache_key"));
-        } catch (Throwable t) {
-            return false;
-        }
-    }
-
-    /** HD has no Story and uses a different Pegasus parser method. */
+    /** Shares each HD APK bridge between Pegasus and playback discovery on the worker. */
     private void resolveHd(ApplicationInfo appInfo) {
-        long started = System.currentTimeMillis();
-        // Keep the established cache format: it stores only names, never dex contents.
+        long started = android.os.SystemClock.elapsedRealtime();
         File file = cacheFileFor(appInfo);
-        Properties props = new Properties();
         String key = cacheKeyFor(appInfo);
-        if (file.exists()) {
-            try (FileInputStream input = new FileInputStream(file)) {
-                props.load(input);
-                if (key.equals(props.getProperty("cache_key"))) {
-                    PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME = props.getProperty(
-                            "PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME", "l");
-                    FbaLog.i("[HD] Pegasus 方法缓存命中: " + PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME);
-                    return;
+        Set<String> underPlayer = new LinkedHashSet<>();
+        Set<String> relate = new LinkedHashSet<>();
+        boolean complete = true;
+        boolean hostFound = false;
+        PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME = "l";
+        System.loadLibrary("dexkit");
+        for (String source : PlayPageAdSniper.sources(hostLoader, appInfo.sourceDir)) {
+            try (DexKitBridge bridge = DexKitBridge.create(source)) {
+                if (bridge == null) {
+                    complete = false;
+                    continue;
                 }
-            } catch (Throwable ignored) {
-                // A damaged cache is refreshed below.
+                List<ClassData> parsers = bridge.findClass(FindClass.create().matcher(
+                        ClassMatcher.create().className("com.bilibili.pegasus.request.PegasusGsonParser")));
+                if (!parsers.isEmpty()) {
+                    hostFound = true;
+                    List<MethodData> methods = bridge.findMethod(FindMethod.create()
+                            .searchInClass(parsers)
+                            .matcher(MethodMatcher.create().paramCount(1).paramTypes("okhttp3.ResponseBody")));
+                    if (!methods.isEmpty()) {
+                        PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME = methods.get(0).getMethodName();
+                    }
+                }
+                // LSPatch can expose the original host through a separate APK path.
+                underPlayer.addAll(PlayPageAdSniper.findUnderPlayer(bridge));
+                relate.addAll(PlayPageAdSniper.findRelate(bridge));
+            } catch (Throwable error) {
+                complete = false;
+                FbaLog.e("[HD] DexKit 特征匹配失败: " + source, error);
             }
         }
-        try (DexKitBridge bridge = DexKitBridge.create(appInfo.sourceDir)) {
-            if (bridge == null) {
-                return;
-            }
-            List<MethodData> methods = bridge.findMethod(FindMethod.create()
-                    .searchInClass(bridge.findClass(FindClass.create()
-                            .matcher(ClassMatcher.create().className("com.bilibili.pegasus.request.PegasusGsonParser"))))
-                    .matcher(MethodMatcher.create().paramCount(1).paramTypes("okhttp3.ResponseBody")));
-            if (!methods.isEmpty()) {
-                PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME = methods.get(0).getMethodName();
-            } else {
-                PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME = "l";
-            }
-            props.setProperty("cache_key", key);
-            props.setProperty("PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME",
-                    PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME);
+        hdUnderPlayerClasses = new ArrayList<>(underPlayer);
+        hdRelateClasses = new ArrayList<>(relate);
+        FbaLog.i("[PERF] HD dexkit scan="
+                + (android.os.SystemClock.elapsedRealtime() - started) + "ms"
+                + " under=" + underPlayer.size() + " relate=" + relate.size()
+                + " thread=" + Thread.currentThread().getName());
+        hostFound |= !underPlayer.isEmpty() || !relate.isEmpty();
+        if (!complete || !hostFound || file == null) {
+            return;
+        }
+        Properties props = new Properties();
+        props.setProperty("cache_key", key);
+        props.setProperty("PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME",
+                PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME);
+        props.setProperty("hdUnderPlayerClasses", String.join("\n", hdUnderPlayerClasses));
+        props.setProperty("hdRelateClasses", String.join("\n", hdRelateClasses));
+        try {
             file.getParentFile().mkdirs();
             File tmp = new File(file.getParentFile(), file.getName() + ".tmp");
             try (FileOutputStream output = new FileOutputStream(tmp)) {
-                props.store(output, "HD Pegasus parser cache");
+                props.store(output, "HD Pegasus and Gripper cache");
             }
-            if (!tmp.renameTo(file)) {
-                //noinspection ResultOfMethodCallIgnored
-                file.delete();
-                //noinspection ResultOfMethodCallIgnored
-                tmp.renameTo(file);
-            }
-            FbaLog.i("[HD] Pegasus 方法定位: " + PEGASUS_SUS_GSON_PARSER_PARSER_METHOD_NAME
-                    + "，耗时 " + (System.currentTimeMillis() - started) + "ms");
-        } catch (Throwable error) {
-            FbaLog.e("[HD] Pegasus 方法定位失败，使用结构回退", error);
+            java.nio.file.Files.move(tmp.toPath(), file.toPath(),
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (Exception error) {
+            FbaLog.e("[HD] DexKit 缓存保存失败，下次启动重试", error);
         }
     }
 

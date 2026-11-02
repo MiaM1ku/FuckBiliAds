@@ -1,7 +1,5 @@
 package com.fuck.bili.ads;
 
-import android.content.pm.ApplicationInfo;
-
 import com.fuck.bili.ads.core.NativeHooks;
 import com.fuck.bili.ads.core.Reflect;
 import com.fuck.bili.ads.ui.FbaLog;
@@ -14,8 +12,8 @@ public final class HdAdSniper {
     private HdAdSniper() {
     }
 
-    public static void hook(ClassLoader loader, ApplicationInfo appInfo) {
-        PlayPageAdSniper.hook(loader, appInfo);
+    public static void hook(ClassLoader loader, DexKitHelper helper) {
+        PlayPageAdSniper.hook(loader, helper.hdUnderPlayerClasses, helper.hdRelateClasses);
         hookPaused(loader);
     }
 

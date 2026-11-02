@@ -95,31 +95,21 @@ public class MainHook extends XposedModule {
             return;
         }
 
-        try {
-            System.loadLibrary("dexkit");
-        } catch (Throwable t) {
-            FbaLog.e("加载 DexKit 动态库失败", t);
-        }
-
-        // ---- 不依赖 DexKit 的 hook：立刻装，启动页/弹幕/小视频等功能不等扫描 ----
-        // 开屏请求拦截必须尽早装（OkHttp 客户端可能早于设置读取就建好），
-        // 开关在拦截器里运行时判断；播放页 / 关注页的 Hook 可以等 Application 就绪后再装。
+        // Publish the registry after both preference-ready and DexKit stages finish.
+        final java.util.concurrent.atomic.AtomicInteger pendingStages =
+                new java.util.concurrent.atomic.AtomicInteger(2);
+        final Runnable stageDone = () -> {
+            if (pendingStages.decrementAndGet() == 0) {
+                finishBoot();
+            }
+        };
+        // Register splash request interception before host clients are constructed.
         install("开屏拦截", () -> BiliSplashSniper.hookEarly(classLoader));
         FbaRuntime.whenReady(() -> {
-            if (FbaPrefs.blockPlay()) {
-                if (hd) {
-                    install("HD播放页广告", () -> HdAdSniper.hook(classLoader, appInfo));
-                } else {
-                    install("播放页广告", () -> BiliAdSniper.hook(classLoader));
-                }
-            } else {
-                FbaLog.i("[SKIP] 播放页广告拦截已在设置中关闭");
-            }
-            if (FbaPrefs.blockFollow()) {
-                install("关注页广告", () -> FollowingListAdSniper.hook(classLoader));
-                install("关注页设置", () -> FollowingTopLeftButton.hook(classLoader));
-            } else {
-                FbaLog.i("[SKIP] 关注页广告拦截已在设置中关闭");
+            try {
+                installReadyHooks(classLoader, hd);
+            } finally {
+                stageDone.run();
             }
         });
         install("底部导航", () -> BiliBottomNavSniper.hook(classLoader));
@@ -134,18 +124,19 @@ public class MainHook extends XposedModule {
         install("更新检查", () -> UpdateChecker.startAutoCheck(processName, packageName));
 
         final boolean shouldRunDescCopyFix = !isOldHost(appInfo, packageName);
-        final DexKitHelper helper = new DexKitHelper();
-        final Runnable dependent = () -> installDependent(packageName, classLoader, helper,
-                shouldRunDescCopyFix);
-
-        if (helper.cacheValid(appInfo)) {
-            long started = System.currentTimeMillis();
+        final DexKitHelper helper = new DexKitHelper(classLoader);
+        final Runnable dependent = () -> FbaRuntime.whenReady(() -> {
             try {
-                helper.resolve(appInfo);
-            } catch (Throwable t) {
-                FbaLog.e("[HOOK FAIL] DexKit resolve", t);
+                installDependent(packageName, classLoader, helper, shouldRunDescCopyFix);
+            } finally {
+                stageDone.run();
             }
-            FbaLog.i("[PERF] dexkit cache hit, load=" + (System.currentTimeMillis() - started) + "ms");
+        });
+
+        long started = android.os.SystemClock.elapsedRealtime();
+        if (helper.loadCache(appInfo)) {
+            FbaLog.i("[PERF] dexkit cache hit, load="
+                    + (android.os.SystemClock.elapsedRealtime() - started) + "ms");
             dependent.run();
         } else {
             FbaLog.i("[PERF] dexkit cache miss, scanning in background (first launch after update)");
@@ -189,9 +180,29 @@ public class MainHook extends XposedModule {
         return false;
     }
 
-    /** 依赖 DexKit 解析结果的 hook：缓存命中时立刻执行，否则等后台扫描完成。 */
+    /** Installs lightweight features once their preference values are available. */
+    private static void installReadyHooks(ClassLoader classLoader, boolean hd) {
+        if (FbaPrefs.blockPlay()) {
+            if (!hd) {
+                install("播放页广告", () -> BiliAdSniper.hook(classLoader));
+            }
+        } else {
+            FbaLog.i("[SKIP] 播放页广告拦截已在设置中关闭");
+        }
+        if (FbaPrefs.blockFollow()) {
+            install("关注页广告", () -> FollowingListAdSniper.hook(classLoader));
+            install("关注页设置", () -> FollowingTopLeftButton.hook(classLoader));
+        } else {
+            FbaLog.i("[SKIP] 关注页广告拦截已在设置中关闭");
+        }
+    }
+
+    /** Installs resolved hooks once both cached names and preferences are available. */
     private static void installDependent(String packageName, ClassLoader classLoader,
                                          DexKitHelper helper, boolean shouldRunDescCopyFix) {
+        if (Host.isHdPackage(packageName) && FbaPrefs.blockPlay()) {
+            install("HD播放页广告", () -> HdAdSniper.hook(classLoader, helper));
+        }
         install("基础 Hook", () -> executeOriginalHooks(packageName, classLoader, helper));
         if (FbaPrefs.blockFeed()) {
             install("广告卡片", () -> BiliCardAdSniper.hook(classLoader, helper));
@@ -219,6 +230,9 @@ public class MainHook extends XposedModule {
         } else {
             FbaLog.i("宿主版本号小于 8.9.0(8090300)，跳过 descCopyFix 逻辑。");
         }
+    }
+
+    private static void finishBoot() {
         HookRegistry.dumpToLog();
         HookRegistry.dumpToFileWhenReady();
         FbaLog.i("[BOOT] hooks done: " + FbaRuntime.summary()

@@ -1,6 +1,5 @@
 package com.fuck.bili.ads;
 
-import android.content.pm.ApplicationInfo;
 import android.view.ViewGroup;
 import android.widget.Space;
 
@@ -15,7 +14,6 @@ import org.luckypray.dexkit.query.matchers.ClassMatcher;
 import org.luckypray.dexkit.result.ClassData;
 
 import java.io.File;
-import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -63,101 +61,114 @@ public final class PlayPageAdSniper {
         return true;
     }
 
-    /** Locates implementations through stable public interfaces, never their obfuscated names. */
-    public static int hook(ClassLoader loader, ApplicationInfo appInfo) {
-        if (appInfo == null || appInfo.sourceDir == null) {
-            FbaLog.w("[PLAY] 无法读取宿主 APK，跳过 Gripper 特征匹配");
-            return 0;
-        }
+    /** Registers structurally validated names resolved by the shared DexKit worker. */
+    public static int hook(ClassLoader loader, List<String> underPlayer, List<String> relate) {
         int hooked = 0;
-        for (String source : sources(loader, appInfo.sourceDir)) {
-            try (DexKitBridge bridge = DexKitBridge.create(source)) {
-                if (bridge == null) {
-                    continue;
-                }
-                // LSPatch may keep the real host DEX in a nested original APK.
-                // Continue when the outer shell has classes but no Gripper API.
-                hooked += hookUnderPlayer(loader, bridge);
-                hooked += hookRelate(loader, bridge);
-                if (hooked > 0) {
-                    break;
-                }
-            } catch (Throwable error) {
-                FbaLog.e("[PLAY] Gripper 特征匹配失败: " + source, error);
-            }
+        try {
+            hooked += hookUnderPlayer(loader, underPlayer);
+        } catch (Throwable error) {
+            FbaLog.e("[PLAY] 播放器浮层 Hook 失败", error);
+        }
+        try {
+            hooked += hookRelate(loader, relate);
+        } catch (Throwable error) {
+            FbaLog.e("[PLAY] 关联推广 Hook 失败", error);
         }
         FbaLog.i("[PLAY] Gripper 接口特征 Hook 数量=" + hooked);
         return hooked;
     }
 
-    private static int hookUnderPlayer(ClassLoader loader, DexKitBridge bridge) throws Throwable {
+    private static int hookUnderPlayer(ClassLoader loader, List<String> candidates) throws Throwable {
+        if (candidates.isEmpty()) {
+            return 0;
+        }
         Class<?> api = Reflect.findClass(UNDER_PLAYER, loader);
         Class<?> callback = Reflect.findClass(UNDER_CALLBACK, loader);
         int hooked = 0;
-        for (ClassData candidate : implementations(bridge, UNDER_PLAYER)) {
-            Class<?> implementation = Reflect.findClass(candidate.getName(), loader);
-            for (Method method : implementation.getDeclaredMethods()) {
-                if (!isUnderPlayerFactory(method.getName()) || method.getReturnType() != callback) {
-                    continue;
-                }
-                NativeHooks.hook("PlayPageAdSniper.UnderPlayer", method, chain -> {
-                    Object result = chain.proceed();
-                    if (result == null || !FbaPrefs.blockPlay()) {
-                        return result;
+        for (Class<?> implementation : resolveImplementations(loader, api, candidates)) {
+            try {
+                for (Method method : implementation.getDeclaredMethods()) {
+                    if (!isUnderPlayerFactory(method.getName()) || method.getReturnType() != callback) {
+                        continue;
                     }
-                    try {
-                        Object parent = chain.getArg(0);
-                        if (!(parent instanceof ViewGroup)) {
+                    NativeHooks.hook("PlayPageAdSniper.UnderPlayer", method, chain -> {
+                        Object result = chain.proceed();
+                        if (result == null || !FbaPrefs.blockPlay()) {
                             return result;
                         }
-                        return blankUnderPlayer(result, callback,
-                                new Space(((ViewGroup) parent).getContext()));
-                    } catch (Throwable error) {
-                        // Both callers handle a missing under-player view without creating it.
-                        FbaLog.e("[PLAY] 浮层空视图包装失败，使用宿主空实现", error);
-                        return null;
-                    }
-                });
-                hooked++;
+                        try {
+                            Object parent = chain.getArg(0);
+                            if (!(parent instanceof ViewGroup)) {
+                                return result;
+                            }
+                            return blankUnderPlayer(result, callback,
+                                    new Space(((ViewGroup) parent).getContext()));
+                        } catch (Throwable error) {
+                            // The host handles a missing under-player view as an empty slot.
+                            FbaLog.e("[PLAY] 浮层空视图包装失败，使用宿主空实现", error);
+                            return null;
+                        }
+                    });
+                    hooked++;
+                }
+            } catch (Throwable error) {
+                FbaLog.e("[PLAY] 浮层候选 Hook 失败: " + implementation.getName(), error);
             }
         }
         FbaLog.i("[PLAY] 播放器下方/标题上方浮层 Hook 数量=" + hooked);
         return hooked;
     }
 
-    private static int hookRelate(ClassLoader loader, DexKitBridge bridge) throws Throwable {
+    private static int hookRelate(ClassLoader loader, List<String> candidates) throws Throwable {
+        if (candidates.isEmpty()) {
+            return 0;
+        }
+        Class<?> api = Reflect.findClass(RELATE, loader);
         int hooked = 0;
-        for (ClassData candidate : implementations(bridge, RELATE)) {
-            Class<?> implementation = Reflect.findClass(candidate.getName(), loader);
-            for (Method method : implementation.getDeclaredMethods()) {
-                if (!isRelateFactory(method.getName())
-                        || !hasSignature(method, RELATE_ENTRY,
-                        "android.view.ViewGroup", "int", "boolean")) {
-                    continue;
+        for (Class<?> implementation : resolveImplementations(loader, api, candidates)) {
+            try {
+                for (Method method : implementation.getDeclaredMethods()) {
+                    if (!isRelateFactory(method.getName())
+                            || !hasSignature(method, RELATE_ENTRY,
+                            "android.view.ViewGroup", "int", "boolean")) {
+                        continue;
+                    }
+                    NativeHooks.hook("PlayPageAdSniper.Relate", method, chain ->
+                            FbaPrefs.blockPlay() ? null : chain.proceed());
+                    hooked++;
                 }
-                NativeHooks.hook("PlayPageAdSniper.Relate", method, chain ->
-                        FbaPrefs.blockPlay() ? null : chain.proceed());
-                hooked++;
+            } catch (Throwable error) {
+                FbaLog.e("[PLAY] 关联推广候选 Hook 失败: " + implementation.getName(), error);
             }
         }
         FbaLog.i("[PLAY] 关联推广接口 Hook 数量=" + hooked);
         return hooked;
     }
 
-    /** Reads paths supplied by the runtime class loader; no LSPatch directory is assumed. */
-    private static List<String> sources(ClassLoader loader, String fallback) {
+    static List<Class<?>> resolveImplementations(
+            ClassLoader loader, Class<?> api, List<String> candidates) {
+        List<Class<?>> matches = new ArrayList<>();
+        for (String candidate : candidates) {
+            Class<?> implementation = Reflect.findClassIfExists(candidate, loader);
+            if (implementation != null && api.isAssignableFrom(implementation)) {
+                matches.add(implementation);
+            }
+        }
+        return matches;
+    }
+
+    /** Reads APK paths supplied by the runtime class loader, including LSPatch hosts. */
+    static List<String> sources(ClassLoader loader, String fallback) {
         Set<String> paths = new LinkedHashSet<>();
         for (ClassLoader current = loader; current != null; current = current.getParent()) {
             try {
-                Field pathList = current.getClass().getDeclaredField("pathList");
-                pathList.setAccessible(true);
-                Object dexPathList = pathList.get(current);
-                Field elements = dexPathList.getClass().getDeclaredField("dexElements");
-                elements.setAccessible(true);
-                for (Object element : (Object[]) elements.get(dexPathList)) {
-                    Field dexFile = element.getClass().getDeclaredField("dexFile");
-                    dexFile.setAccessible(true);
-                    Object dex = dexFile.get(element);
+                Object dexPathList = Reflect.getObjectField(current, "pathList");
+                if (dexPathList == null) {
+                    continue;
+                }
+                Object[] elements = (Object[]) Reflect.getObjectField(dexPathList, "dexElements");
+                for (Object element : elements) {
+                    Object dex = Reflect.getObjectField(element, "dexFile");
                     if (dex == null) {
                         continue;
                     }
@@ -174,9 +185,21 @@ public final class PlayPageAdSniper {
         return new ArrayList<>(paths);
     }
 
-    private static List<ClassData> implementations(DexKitBridge bridge, String api) {
-        return bridge.findClass(FindClass.create().matcher(
-                ClassMatcher.create().addInterface(ClassMatcher.create().className(api))));
+    static List<String> findUnderPlayer(DexKitBridge bridge) {
+        return implementations(bridge, UNDER_PLAYER);
+    }
+
+    static List<String> findRelate(DexKitBridge bridge) {
+        return implementations(bridge, RELATE);
+    }
+
+    private static List<String> implementations(DexKitBridge bridge, String api) {
+        List<String> names = new ArrayList<>();
+        for (ClassData candidate : bridge.findClass(FindClass.create().matcher(
+                ClassMatcher.create().addInterface(ClassMatcher.create().className(api))))) {
+            names.add(candidate.getName());
+        }
+        return names;
     }
 
     /**
